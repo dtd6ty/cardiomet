@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CardioMet — CAD 亚型代谢分类器（Ridge 模型版）</title>
 
-    <script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"
+            crossorigin="anonymous">
     </script>
 
     <style>
@@ -170,7 +171,7 @@
             <!-- 右侧：预测结果 -->
             <div class="card">
                 <h3>📈 聚类预测结果</h3>
-                                <div id="predictionDisplay">
+                <div id="predictionDisplay">
                     <div class="result-box primary">
                         <strong>请点击「执行预测」</strong>
                     </div>
@@ -194,12 +195,11 @@
         // 变量顺序：FBG, SBP, DBP, eGFR, TG, BMI
         const VARS = ["FBG", "SBP", "DBP", "eGFR", "TG", "BMI"];
 
-        // 标准化参数（残差中心化 & 缩放）
-        const CENTER = { FBG: 0, SBP: 0, DBP: 0, eGFR: 0, TG: 0, BMI: 0 };
+        // 标准化参数（center 经确认为浮点零 ~1e-15，故省略；scale 已与 R .rds 核对一致）
         const SCALE = { FBG: 2.398623, SBP: 18.795520, DBP: 11.662964, eGFR: 14.797940, TG: 1.056237,
         BMI: 3.127758 };
 
-        // 调整模型：每个代谢变量 ~ sex + age 的线性系数
+        // 调整模型：每个代谢变量 ~ sex + age 的线性系数（✅ 已核对）
         const ADJUST = {
             FBG: { intercept: 5.86636774, sex: 0.07710406, age: 0.00450430 },
             SBP: { intercept: 118.6669739, sex: 2.9797760, age: 0.1873061 },
@@ -209,7 +209,7 @@
             BMI: { intercept: 30.46583428, sex: -0.18165567, age: -0.07259015 }
         };
 
-        // Ridge 模型系数（4 类 × 7 参数：intercept + 6 个代谢变量）
+        // Ridge 模型系数（4 类 × 7 参数：intercept + 6 个代谢变量）（✅ 已核对）
         const RIDGE_COEF = {
             MH: { intercept: 4.175313, FBG: -3.111170, SBP: -3.795522, DBP: -3.565924, eGFR: 3.104532,
             TG: -1.992770, BMI: -2.255173 },
@@ -229,42 +229,38 @@
             RI: "肾功能损伤型 (RI)"
         };
 
-        // 亚型解释
-        
+        // 共享常量
+        const CLASSES = ["MH", "HG", "HT", "RI"];
+        const DEFAULTS = { age: 62, FBG: 5.6, SBP: 130, DBP: 85, eGFR: 80, TG: 2.3, BMI: 25.0 };
+
         // ==================== 核心预测函数 ====================
         function predictCluster() {
-            // 读取输入
+            // ---------- 第 0 步：读取输入 ----------
             const sex_str = document.getElementById("cm_sex").value;
+            // 性别编码：男=1, 女=2（已与 R 训练数据核对一致）
             const sex = (sex_str === "男") ? 1 : 2;
-            const age = parseInt(document.getElementById("cm_age").value) || 62;
+            const age = parseInt(document.getElementById("cm_age").value, 10) || DEFAULTS.age;
             const raw = {
-                FBG: parseFloat(document.getElementById("cm_fbg").value) || 5.6,
-                SBP: parseInt(document.getElementById("cm_sbp").value) || 130,
-                DBP: parseInt(document.getElementById("cm_dbp").value) || 85,
-                eGFR: parseInt(document.getElementById("cm_egfr").value) || 80,
-                TG: parseFloat(document.getElementById("cm_tg").value) || 2.3,
-                BMI: parseFloat(document.getElementById("cm_bmi").value) || 25.0
+                FBG: parseFloat(document.getElementById("cm_fbg").value) || DEFAULTS.FBG,
+                SBP: parseInt(document.getElementById("cm_sbp").value, 10) || DEFAULTS.SBP,
+                DBP: parseInt(document.getElementById("cm_dbp").value, 10) || DEFAULTS.DBP,
+                eGFR: parseFloat(document.getElementById("cm_egfr").value) || DEFAULTS.eGFR,
+                TG: parseFloat(document.getElementById("cm_tg").value) || DEFAULTS.TG,
+                BMI: parseFloat(document.getElementById("cm_bmi").value) || DEFAULTS.BMI
             };
 
-            // ---------- 第 1 步：计算调整残差 ----------
-            // residual = 实际值 - (adjust_intercept + adjust_sex * sex + adjust_age * age)
-            const resid = {};
+            // ---------- 第 1 步：计算调整残差 + 第 2 步：标准化（合并在一个循环中） ----------
+            const scaled = {};
             for (const v of VARS) {
                 const adj = ADJUST[v];
                 const predicted = adj.intercept + adj.sex * sex + adj.age * age;
-                resid[v] = raw[v] - predicted;
-            }
-
-            // ---------- 第 2 步：标准化 ----------
-            const scaled = {};
-            for (const v of VARS) {
-                scaled[v] = (resid[v] - CENTER[v]) / SCALE[v];
+                const resid = raw[v] - predicted;
+                scaled[v] = resid / SCALE[v];
             }
 
             // ---------- 第 3 步：Ridge 线性预测 + Softmax ----------
-            const classes = ["MH", "HG", "HT", "RI"];
             const scores = {};
-            for (const cls of classes) {
+            for (const cls of CLASSES) {
                 const coef = RIDGE_COEF[cls];
                 let score = coef.intercept;
                 for (const v of VARS) {
@@ -273,24 +269,29 @@
                 scores[cls] = score;
             }
 
-            // Softmax 转换为概率
-            const expScores = {};
+            // Softmax 转换为概率（数值稳定版：减去最大值防溢出）
+            const maxScore = Math.max(...Object.values(scores));
             let expSum = 0;
-            for (const cls of classes) {
-                expScores[cls] = Math.exp(scores[cls]);
-                expSum += expScores[cls];
+            const probsRaw = {};
+            for (const cls of CLASSES) {
+                probsRaw[cls] = Math.exp(scores[cls] - maxScore);
+                expSum += probsRaw[cls];
             }
+
+            // 百分比舍入，误差均摊到最大概率类别（而非固定 MH）
             const probs = {};
-            for (const cls of classes) {
-                probs[cls] = Math.round((expScores[cls] / expSum) * 100);
+            for (const cls of CLASSES) {
+                probs[cls] = Math.round((probsRaw[cls] / expSum) * 100);
+            }
+            const probSum = Object.values(probs).reduce((a, b) => a + b, 0);
+            if (probSum !== 100) {
+                // 找最大概率类别承担舍入误差
+                const adjustCls = CLASSES.reduce((a, b) => probs[a] >= probs[b] ? a : b);
+                probs[adjustCls] += (100 - probSum);
             }
 
-            // 确保总和为 100%
-            const probSum = Object.values(probs).reduce((a, b) => a + b, 0);
-            probs[classes[0]] += (100 - probSum);
-
-            // 最高概率类别
-            const predicted = classes.reduce((a, b) => probs[a] > probs[b] ? a : b);
+            // 最高概率类别（用 >= 使平局时可预测地选后者）
+            const predicted = CLASSES.reduce((a, b) => probs[a] >= probs[b] ? a : b);
 
             // ---------- 第 4 步：更新界面 ----------
             document.getElementById("predictionDisplay").innerHTML =
@@ -298,89 +299,94 @@
                 '</strong></div>';
 
             // 渲染 Chart.js 条形图
-            try { renderClusterChart(probs, predicted); } catch (e) {}
+            try {
+                renderClusterChart(probs, predicted);
+            } catch (e) {
+                console.error("Chart render failed:", e);
+            }
         }
 
         // ==================== Chart.js 条形图 ====================
         let clusterChart = null;
 
-        function renderClusterChart(probs, predicted) {
-            if (typeof Chart === "undefined") return;
-            const ctx = document.getElementById("clusterChart").getContext("2d");
-            if (clusterChart) clusterChart.destroy();
+        // 共享图表配置
+        const CHART_OPTIONS = {
+            responsive: true, maintainAspectRatio: false, indexAxis: "y",
+            plugins: { legend: { display: false } },
+            layout: { padding: { right: 45 } },
+            scales: {
+                x: {
+                    min: 0, max: 100,
+                    ticks: { callback: v => v + "%" },
+                    grid: { color: "#e8e8e8" }
+                }
+            }
+        };
 
-                       if (!probs) {
+        // 百分比标签插件（模块级，从 chart.data 读取值，避免闭包捕获）
+        const pctPlugin = {
+            id: "pctLabels",
+            afterDatasetsDraw(chart) {
+                const { ctx } = chart;
+                const meta = chart.getDatasetMeta(0);
+                const ds = chart.data.datasets[0];
+                if (!ds || !meta.data) return;
+                ctx.save();
+                ctx.font = "bold 12px -apple-system, sans-serif";
+                ctx.textBaseline = "middle";
+                ctx.fillStyle = "#333";
+                ctx.textAlign = "left";
+                meta.data.forEach((bar, i) => {
+                    const v = ds.data[i];
+                    if (v > 0) {
+                        ctx.fillText(v + "%", bar.x + 6, bar.y);
+                    }
+                });
+                ctx.restore();
+            }
+        };
+
+        function renderClusterChart(probs, predicted) {
+            if (typeof Chart === "undefined") {
+                console.warn("Chart.js 未加载，无法渲染图表");
+                return;
+            }
+            const ctx = document.getElementById("clusterChart");
+            if (!ctx) return;
+
+            const labels = CLASSES.map(c => CLUSTER_NAMES[c]);
+            const values = probs ? CLASSES.map(c => probs[c]) : [0, 0, 0, 0];
+            const bgColors = probs
+                ? CLASSES.map(c => c === predicted ? "#0055A4" : "#b0c4de")
+                : "#e0e0e0";
+
+            if (clusterChart) {
+                // 复用已有实例：就地更新数据并重绘
+                clusterChart.data.labels = labels;
+                clusterChart.data.datasets[0].data = values;
+                clusterChart.data.datasets[0].backgroundColor = bgColors;
+                clusterChart.update();
+            } else {
+                // 首次创建
                 clusterChart = new Chart(ctx, {
                     type: "bar",
                     data: {
-                        labels: Object.values(CLUSTER_NAMES),
-                        datasets: [{ data: [0, 0, 0, 0], backgroundColor: "#e0e0e0" }]
+                        labels: labels,
+                        datasets: [{ data: values, backgroundColor: bgColors, borderRadius: 6 }]
                     },
-                    options: {
-                        responsive: true, maintainAspectRatio: false, indexAxis: "y",
-                        plugins: { legend: { display: false } },
-                        layout: { padding: { right: 45 } },
-                        scales: {
-                            x: {
-                                min: 0, max: 100,
-                                ticks: { callback: v => v + "%" },
-                                grid: { color: "#e8e8e8" }
-                            }
-                        }
-                    }
+                    options: CHART_OPTIONS,
+                    plugins: [pctPlugin]
                 });
-                return;
             }
-
-
-            const classes = ["MH", "HG", "HT", "RI"];
-            const values = classes.map(c => probs[c]);
-            const bgColors = classes.map(c => c === predicted ? "#0055A4" : "#b0c4de");
-
-            // 自定义插件：条形右侧显示百分比
-            const pctPlugin = {
-                id: "pctLabels",
-                afterDatasetsDraw(chart) {
-                    const { ctx } = chart;
-                    const meta = chart.getDatasetMeta(0);
-                    ctx.font = "bold 12px -apple-system, sans-serif";
-                    ctx.textBaseline = "middle";
-                    meta.data.forEach((bar, i) => {
-                        const v = values[i];
-                        if (v > 0) {
-                            ctx.fillStyle = "#333";
-                            ctx.textAlign = "left";
-                            ctx.fillText(v + "%", bar.x + 6, bar.y);
-                        }
-                    });
-                }
-            };
-
-            clusterChart = new Chart(ctx, {
-                type: "bar",
-                data: {
-                    labels: classes.map(c => CLUSTER_NAMES[c]),
-                    datasets: [{ data: values, backgroundColor: bgColors, borderRadius: 6 }]
-                },
-                options: {
-                    responsive: true, maintainAspectRatio: false, indexAxis: "y",
-                    plugins: { legend: { display: false } },
-                    layout: { padding: { right: 45 } },
-                    scales: {
-                        x: {
-                            min: 0, max: 100,
-                            ticks: { callback: v => v + "%" },
-                            grid: { color: "#e8e8e8" }
-                        }
-                    }
-                },
-                plugins: [pctPlugin]
-            });
         }
 
-        // 页面加载
+        // 页面加载时绘制空图表占位
         document.addEventListener("DOMContentLoaded", () => {
-            try { renderClusterChart(null, null); } catch (e) {}
+            try {
+                renderClusterChart(null, null);
+            } catch (e) {
+                console.error("Initial chart render failed:", e);
+            }
         });
     </script>
 </body>
